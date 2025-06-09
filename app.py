@@ -15,6 +15,7 @@ s3_bucket = 'my-medical-transcribe-bucket'  # Replace with your S3 bucket name
 s3 = boto3.client('s3', region_name=region)
 transcribe = boto3.client('transcribe', region_name=region)
 
+st.set_page_config(page_title="Live Medical Transcription (Batch)", layout="wide")
 st.title("AWS Medical Transcribe Voice-to-Text")
 
 audio_file = st.audio_input("Record a voice message")
