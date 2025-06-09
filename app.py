@@ -56,7 +56,7 @@ if audio_file:
             if job_status in ['COMPLETED', 'FAILED']:
                 break
             st.write("Waiting for job to complete...")
-            time.sleep(10)
+            time.sleep(7)
 
         if job_status == 'COMPLETED':
             output_uri = status['MedicalTranscriptionJob']['Transcript']['TranscriptFileUri']

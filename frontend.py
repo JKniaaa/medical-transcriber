@@ -2,7 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Live Medical Transcription", layout="wide")
-st.title("Live Medical Transcription via Mic (AWS Transcribe Medical)")
+st.title("📝 Live Medical Transcription via Mic (AWS Transcribe Medical)")
 
 st.markdown("""
 Use the button below to start recording your voice. Your audio will be streamed to AWS Transcribe Medical in real time.
@@ -31,9 +31,8 @@ components.html(r"""
       }
       .done {
         color: green;
-      }
-				
-			.error {
+      }	
+	    .error {
 				color: red;
 			}
     </style>
@@ -41,10 +40,13 @@ components.html(r"""
   <body>
     <button id="record">Start Recording</button>
     <button id="stop" disabled>Stop Recording</button>
+    <button id="pause" style="display: none;">Pause</button>
     <button id="clear">Clear Transcript</button>
 		<button id="copy">Copy</button>
     <span id="copy-notification" style="color: green; font-weight: bold; display: none; margin-left: 10px;">Copied!</span>
-    <p id="status" class="idle">Status: Idle</p>
+		<button id="save" style="display: none;">Save to Bucket</button>
+		<span id="save-notification" style="color: green; font-weight: bold; display: none; margin-left: 10px;">Saved!</span>
+		<p id="status" class="idle">Status: Idle</p>
     <textarea id="transcript" 
       style="
         width: 100%;
@@ -60,192 +62,232 @@ components.html(r"""
       "
     ></textarea>
 
-    <script>
-      let ws;
-      let audioContext, source, processor, stream;
-      let lastSent = Date.now();
-      let keepAlive;
+		<script>
+			let ws;
+			let audioContext, source, processor, stream;
+			let lastSent = Date.now();
+			let keepAlive;
+			let isRecording = false;
+			let isPaused = false;
 
-      function setStatus(text, className) {
-        const statusEl = document.getElementById("status");
-        statusEl.innerText = text;
-        statusEl.className = className;
-      }
-                
-      function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
-        if (outputSampleRate === inputSampleRate) return buffer;
+			function $(id) {
+				return document.getElementById(id);
+			}
 
-        const sampleRateRatio = inputSampleRate / outputSampleRate;
-        const newLength = Math.round(buffer.length / sampleRateRatio);
-        const result = new Int16Array(newLength);
+			function setStatus(text, className) {
+				const statusEl = $("status");
+				statusEl.innerText = text;
+				statusEl.className = className;
+			}
 
-        for (let i = 0; i < newLength; i++) {
-          const start = Math.floor(i * sampleRateRatio);
-          const end = Math.floor((i + 1) * sampleRateRatio);
-          let sum = 0;
-          let count = 0;
+			function showNotification(id, duration = 2000) {
+				const notif = $(id);
+				notif.style.display = "inline";
+				setTimeout(() => notif.style.display = "none", duration);
+			}
 
-          for (let j = start; j < end && j < buffer.length; j++) {
-            sum += buffer[j];
-            count++;
-          }
+			function toggleSaveButton() {
+				$("save").style.display = $("transcript").value.trim() ? "inline" : "none";
+			}
 
-          const avg = sum / count;
-          const s = Math.max(-1, Math.min(1, avg));
-          result[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
+			function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+				if (outputSampleRate === inputSampleRate) return buffer;
+				const ratio = inputSampleRate / outputSampleRate;
+				const newLen = Math.round(buffer.length / ratio);
+				const result = new Int16Array(newLen);
+				for (let i = 0; i < newLen; i++) {
+					const start = Math.floor(i * ratio);
+					const end = Math.floor((i + 1) * ratio);
+					let sum = 0, count = 0;
+					for (let j = start; j < end && j < buffer.length; j++) {
+						sum += buffer[j];
+						count++;
+					}
+					const avg = sum / count;
+					const s = Math.max(-1, Math.min(1, avg));
+					result[i] = Math.round(s < 0 ? s * 0x8000 : s * 0x7FFF);
+				}
+				return result;
+			}
 
-        return result;
-      }
+			function convertFloat32ToInt16(buffer) {
+				return Int16Array.from(buffer, s => {
+					const clamped = Math.max(-1, Math.min(1, s));
+					return Math.round(clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF);
+				});
+			}
 
-      function convertFloat32ToInt16(buffer) {
-        let l = buffer.length;
-        let buf = new Int16Array(l);
-        while (l--) {
-          let s = Math.max(-1, Math.min(1, buffer[l]));
-          buf[l] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-          buf[l] = Math.round(buf[l]);
-        }
-        return buf;
-      }
+			async function startRecording() {
+				$("transcript").value = "";
+				stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+				setStatus("Status: Connecting to server...", "connecting");
 
-      async function start() {
-        // Clear transcript box on new recording
-        document.getElementById("transcript").value = "";
+				ws = new WebSocket("ws://localhost:3000/api/stream");
+				ws.binaryType = 'arraybuffer';
 
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        setStatus("Status: Connecting to server...", "connecting");
+				ws.onopen = () => {
+					isRecording = true;
+					setStatus("Status: Recording and streaming audio...", "recording");
+					$("pause").style.display = "inline"; 
+					audioContext = new (window.AudioContext || window.webkitAudioContext)();
+					source = audioContext.createMediaStreamSource(stream);
+					processor = audioContext.createScriptProcessor(2048, 1, 1);
 
-        ws = new WebSocket("ws://localhost:3000/api/stream");
-        ws.binaryType = 'arraybuffer';
+					source.connect(processor);
+					processor.connect(audioContext.destination);
 
-        ws.onopen = () => {
-          setStatus("Status: Recording and streaming audio...", "recording");
-          audioContext = new (window.AudioContext || window.webkitAudioContext)();
-          source = audioContext.createMediaStreamSource(stream);
-          processor = audioContext.createScriptProcessor(2048, 1, 1);
-          console.log("AudioContext sample rate:", audioContext.sampleRate);
+					processor.onaudioprocess = (e) => {
+						const input = e.inputBuffer.getChannelData(0);
+						const data = (audioContext.sampleRate === 48000)
+							? convertFloat32ToInt16(input)
+							: downsampleBuffer(input, audioContext.sampleRate, 48000);
+						if (ws.readyState === 1) {
+							ws.send(data.buffer);
+							lastSent = Date.now();
+						}
+					};
 
-          source.connect(processor);
-          processor.connect(audioContext.destination);
+					keepAlive = setInterval(() => {
+						if (ws.readyState === 1 && Date.now() - lastSent > 5000) {
+							ws.send(new Int16Array(2048).buffer);
+							lastSent = Date.now();
+						}
+					}, 5000);
+				};
 
-          processor.onaudioprocess = (e) => {
-            const inputData = e.inputBuffer.getChannelData(0);
-            const downsampled = (audioContext.sampleRate === 48000) 
-              ? convertFloat32ToInt16(inputData) 
-              : downsampleBuffer(inputData, audioContext.sampleRate, 48000);
-            if (ws.readyState === 1) {
-              ws.send(downsampled.buffer);
-              lastSent = Date.now();
-            }
-          };
+				ws.onmessage = handleTranscriptMessage;
+				ws.onclose = cleanupRecording;
+				ws.onerror = (event) => {
+					console.error("WebSocket error:", event);
+					setStatus("WebSocket error occurred", "error");
+					$("transcript").value += "[WebSocket error]\n";
+				};
+			}
 
-          keepAlive = setInterval(() => {
-            if (ws.readyState === 1 && Date.now() - lastSent > 5000) {
-              let silent = new Int16Array(2048).buffer;
-              ws.send(silent);
-              lastSent = Date.now();
-            }
-          }, 5000);
-        };
+			function handleTranscriptMessage(event) {
+				try {
+					const parsed = JSON.parse(event.data);
+					if (parsed.ErrorMessage || parsed.error) {
+						setStatus("Error from server: " + (parsed.ErrorMessage || parsed.error), "error");
+						return;
+					}
 
-        ws.onmessage = (event) => {
-          try {
-            const parsed = JSON.parse(event.data);
+					const results = parsed.TranscriptEvent?.Transcript?.Results || [];
+					results.forEach(result => {
+						if (!result.IsPartial && result.Alternatives.length > 0) {
+							const line = result.Alternatives[0].Transcript;
+							$("transcript").value += line + "\n";
+							$("transcript").scrollTop = $("transcript").scrollHeight;
+						}
+					});
 
-            // Check if backend sent an error object or message
-            if (parsed.ErrorMessage || parsed.error) {
-              const errorMsg = parsed.ErrorMessage || parsed.error;
-              setStatus("Error from server: " + errorMsg, "error");
-              return;
-            }
+					if (isRecording && !isPaused) {
+						setStatus("Status: Recording and streaming audio...", "recording");
+					}
 
-            const results = parsed.TranscriptEvent?.Transcript?.Results || [];
-            console.log("Message from server:", event.data);
-            console.log("Transcript results:", results);
+				} catch {
+					setStatus("Error: Invalid server response", "error");
+					$("transcript").value += "[Error] " + event.data + "\n";
+				}
+			}
 
-            results.forEach(result => {
-              if (!result.IsPartial && result.Alternatives.length > 0) {
-                const transcriptText = result.Alternatives[0].Transcript;
-                const transcriptBox = document.getElementById("transcript");
-                transcriptBox.value += transcriptText + "\n";
-                transcriptBox.scrollTop = transcriptBox.scrollHeight;
-              }
-            });
+			function cleanupRecording() {
+				setStatus("Status: Done", "done");
+				processor?.disconnect();
+				processor.onaudioprocess = null;
+				source?.disconnect();
+				audioContext?.close();
+				stream?.getTracks().forEach(t => t.stop());
+				clearInterval(keepAlive);
+			}
 
-            // If no errors, clear error status (optional)
-            setStatus("Status: Recording and streaming audio...", "recording");
-
-          } catch (e) {
-            // JSON parse failed: show error status and append raw data to transcript
-            setStatus("Error: Invalid server response", "error");
-            document.getElementById("transcript").value += "[Error] " + event.data + "\n";
-          }
-        };
-
-        ws.onclose = () => {
-				  console.log("WebSocket closed:", event);
-          setStatus("Status: Done", "done");
-          if (processor) {
-            processor.disconnect();
-            processor.onaudioprocess = null;
-          }
-          if (source) source.disconnect();
-          if (audioContext) audioContext.close();
-          if (stream) stream.getTracks().forEach(t => t.stop());
-          clearInterval(keepAlive);
-        };
+			function stopRecording() {
+				if (ws?.readyState === WebSocket.OPEN) ws.send(new ArrayBuffer(0));
+				isRecording = false;
+				setStatus("Status: Finishing transcription...", "finishing");
+				$("stop").disabled = true;
+				$("record").disabled = false;
+				$("save").style.display = "inline";
+				$("pause").style.display = "none";
+				$("pause").innerText = "Pause";
+				isPaused = false;
+			}
 				
-        ws.onerror = (event) => {
-          console.error("WebSocket error:", event);
-          setStatus("WebSocket error occurred", "error");
-          document.getElementById("transcript").value += "[WebSocket error]\n";
-        };
+			function togglePauseResume() {
+				if (!audioContext || !processor) return;
 
-        document.getElementById("stop").onclick = () => {
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(new ArrayBuffer(0));
-          }
-          setStatus("Status: Finishing transcription...", "finishing");
-          document.getElementById("stop").disabled = true;
-          document.getElementById("record").disabled = false;
-        };
-      }
+				if (isPaused) {
+					processor.connect(audioContext.destination);
+					source.connect(processor);
+					setStatus("Status: Recording and streaming audio...", "recording");
+					$("pause").innerText = "Pause";
+				} else {
+					processor.disconnect(audioContext.destination);
+					source.disconnect(processor);
+					setStatus("Status: Paused", "idle");
+					$("pause").innerText = "Resume";
+				}
 
-      document.getElementById("record").onclick = () => {
-        document.getElementById("record").disabled = true;
-        document.getElementById("stop").disabled = false;
-        start();
-      };
-				
-      document.getElementById("clear").onclick = () => {
-        document.getElementById("transcript").value = "";
-      };
-				
-			document.getElementById("copy").onclick = () => {
-        const transcriptBox = document.getElementById("transcript");
-        const text = transcriptBox.value;
-        if (!text) {
-          alert("Transcript is empty!");
-          return;
-        }
-        navigator.clipboard.writeText(text).then(() => {
-          const notif = document.getElementById("copy-notification");
-          notif.style.display = "inline";
-          setTimeout(() => {
-            notif.style.display = "none";
-          }, 2000);
-        }).catch(err => {
-          alert("Failed to copy: " + err);
-        });
-      };
+				isPaused = !isPaused;
+				$("save").style.display = "none";
+			}
 
-    </script>
+			function clearTranscript() {
+				$("transcript").value = "";
+				toggleSaveButton();
+			}
+
+			function copyTranscript() {
+				const text = $("transcript").value;
+				if (!text) return alert("Transcript is empty!");
+				navigator.clipboard.writeText(text)
+					.then(() => showNotification("copy-notification"))
+					.catch(err => alert("Failed to copy: " + err));
+			}
+
+			function saveTranscript() {
+				const transcript = $("transcript").value.trim();
+				if (!transcript) return alert("Transcript is empty!");
+
+				fetch("http://localhost:3000/api/save", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ transcript })
+				})
+					.then(res => res.json())
+					.then(data => {
+						alert("✅ " + data.message);
+						$("save").style.display = "none";
+					})
+					.catch(err => {
+						console.error("❌ Error saving:", err);
+						alert("Failed to save transcript.");
+					});
+			}
+
+			function initUIEvents() {
+				$("record").onclick = () => {
+					$("record").disabled = true;
+					$("stop").disabled = false;
+					$("save").style.display = "none";
+					$("pause").style.display = "none";
+					startRecording();
+				};
+				$("stop").onclick = stopRecording;
+				$("pause").onclick = togglePauseResume;
+				$("clear").onclick = clearTranscript;
+				$("copy").onclick = copyTranscript;
+				$("save").onclick = saveTranscript;
+				$("transcript").oninput = toggleSaveButton;
+			}
+
+			window.onload = initUIEvents;
+		</script>
   </body>
 </html>
-""", height=500)
+""", height=300)
 
 st.markdown("""
 Once you click **Start Recording**, your voice will be captured and streamed live.  
-**Stop Recording** will send an “end-of-stream,” then transcripts will appear below as they are finalized.
+**Stop Recording** will send an “end-of-stream (EOS),” then transcripts will appear in the box as they are finalized.
 """)
