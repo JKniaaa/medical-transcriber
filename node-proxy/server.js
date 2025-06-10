@@ -1,27 +1,37 @@
 import express from 'express';
 import cors from 'cors';
 import expressWs from 'express-ws';
+import dotenv from 'dotenv';
 import {
   TranscribeStreamingClient,
   StartMedicalStreamTranscriptionCommand
 } from "@aws-sdk/client-transcribe-streaming";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
-// Initialize S3 client (region should match your bucket's region)
-const s3Client = new S3Client({ region: "ap-southeast-2" });
+// Load environment variables
+dotenv.config();
+
+// Environment constants
+const REGION = process.env.AWS_REGION;
+const BUCKET = process.env.S3_BUCKET;
+const PORT = process.env.PORT || 3000;
+
+// AWS clients
+const transcribeClient = new TranscribeStreamingClient({ region: REGION });
+const s3Client = new S3Client({ region: REGION });
 
 const { app } = expressWs(express());
-const PORT = 3000;
 
-// Enable CORS for your Streamlit app origin
+// CORS for Streamlit frontend
 app.use(cors({
-  origin: 'http://localhost:8501',  // allow Streamlit frontend
+  origin: 'http://localhost:8501',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
 }));
 
 app.use(express.json());
 
+// Audio stream utility
 class AudioStream {
   constructor() {
     this.queue = [];
@@ -53,10 +63,7 @@ class AudioStream {
   }
 }
 
-const REGION = "ap-southeast-2";
-const client = new TranscribeStreamingClient({ region: REGION });
-
-
+// WebSocket transcription route
 app.ws('/api/stream', (ws, req) => {
   console.log("🔌 Client connected");
 
@@ -84,7 +91,7 @@ app.ws('/api/stream', (ws, req) => {
         AudioStream: audioStream
       });
 
-      const response = await client.send(command);
+      const response = await transcribeClient.send(command);
 
       for await (const event of response.TranscriptResultStream) {
         if (event.Transcript?.Results) {
@@ -110,30 +117,25 @@ app.ws('/api/stream', (ws, req) => {
   })();
 });
 
-
+// Save transcript route
 app.post('/api/save', async (req, res) => {
   const { transcript } = req.body;
   if (!transcript) {
     return res.status(400).json({ error: "Transcript missing" });
   }
 
-  // Prepare S3 upload parameters
-  const bucketName = "my-medical-transcribe-bucket";  // <-- replace with your actual bucket name
-  const objectKey = `stream-transcripts/transcript-${Date.now()}.txt`; // unique filename
+  const objectKey = `stream-transcripts/transcript-${Date.now()}.txt`;
 
   const params = {
-    Bucket: bucketName,
+    Bucket: BUCKET,
     Key: objectKey,
     Body: transcript,
     ContentType: "text/plain"
   };
 
   try {
-    // Upload to S3
     await s3Client.send(new PutObjectCommand(params));
-
-    console.log(`💾 Saved transcript to s3://${bucketName}/${objectKey}`);
-
+    console.log(`💾 Saved transcript to s3://${BUCKET}/${objectKey}`);
     res.status(200).json({ message: "Transcript saved!" });
   } catch (err) {
     console.error("❌ Failed to save transcript to S3:", err);
@@ -141,7 +143,7 @@ app.post('/api/save', async (req, res) => {
   }
 });
 
-
+// Start server
 app.listen(PORT, () => {
   console.log(`🚀 Proxy listening at ws://localhost:${PORT}/api/stream`);
 });

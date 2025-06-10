@@ -6,10 +6,13 @@ import os
 from tempfile import NamedTemporaryFile
 import requests
 from urllib.parse import urlparse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # AWS configuration
-region = 'ap-southeast-2'  # Change to your region
-s3_bucket = 'my-medical-transcribe-bucket'  # Replace with your S3 bucket name
+region = os.getenv('AWS_REGION')
+s3_bucket = os.getenv('S3_BUCKET')
 
 # Initialize AWS clients
 s3 = boto3.client('s3', region_name=region)
@@ -30,10 +33,15 @@ if audio_file:
             audio_path = tmp_file.name
 
         # Upload to S3
-        file_key = f"streamlit-audio/{uuid.uuid4()}.wav"
-        s3.upload_file(audio_path, s3_bucket, file_key)
-        s3_uri = f"s3://{s3_bucket}/{file_key}"
-        st.write("Uploaded to S3:", s3_uri)
+        try:
+            file_key = f"streamlit-audio/{uuid.uuid4()}.wav"
+            s3.upload_file(audio_path, s3_bucket, file_key)
+            s3_uri = f"s3://{s3_bucket}/{file_key}"
+            st.write("Uploaded to S3:", s3_uri)
+        except Exception as e:
+            st.error(f"Failed to upload audio to S3: {e}")
+            os.remove(audio_path)
+            st.stop()
 
         # Start Transcription Job
         job_name = f"transcription-job-{uuid.uuid4()}"
@@ -83,8 +91,9 @@ if audio_file:
                     if response.text.strip():
                         transcript_json = response.json()
                         transcript_text = transcript_json['results']['transcripts'][0]['transcript']
+                        st.session_state["transcript_text"] = transcript_text
 
-                        # Save original transcription as plain text file in S3 (alongside JSON)
+                        # Save original transcription as plain text file in S3
                         original_txt_key = f"transcripts/{job_name}.txt"
                         try:
                             s3.put_object(
@@ -109,27 +118,30 @@ if audio_file:
             else:
                 st.error("Transcript file could not be retrieved or parsed after multiple attempts.")
 
-            if transcript_text:
-                st.subheader("Transcription Result - Editable")
-                edited_text = st.text_area("Edit the transcript here:", transcript_text, height=300)
-
-                if st.button("Save Edited Transcript to S3"):
-                    edited_key = f"edited-transcripts/edited-{uuid.uuid4()}.txt"
-                    try:
-                        s3.put_object(
-                            Bucket=s3_bucket,
-                            Key=edited_key,
-                            Body=edited_text.encode('utf-8'),
-                            ContentType='text/plain'
-                        )
-                        st.success(f"Edited transcript saved to s3://{s3_bucket}/{edited_key}")
-                    except Exception as e:
-                        st.error(f"Failed to save edited transcript: {e}")
-
-                st.write("You can select and copy the text above as needed.")
-
         else:
-            st.error("Transcription job failed.")
+            failure_reason = status['MedicalTranscriptionJob'].get('FailureReason', 'No reason provided')
+            st.error(f"Transcription job failed. Reason: {failure_reason}")
 
         # Cleanup
         os.remove(audio_path)
+
+# ---- Editable Transcript Section (outside the upload/transcribe button block) ----
+
+if "transcript_text" in st.session_state:
+    st.subheader("Transcription Result - Editable")
+    edited_text = st.text_area("Edit the transcript here:", st.session_state["transcript_text"], height=300)
+
+    if st.button("Save Edited Transcript to S3"):
+        edited_key = f"edited-transcripts/edited-{uuid.uuid4()}.txt"
+        try:
+            s3.put_object(
+                Bucket=s3_bucket,
+                Key=edited_key,
+                Body=edited_text.encode('utf-8'),
+                ContentType='text/plain'
+            )
+            st.success(f"Edited transcript saved to s3://{s3_bucket}/{edited_key}")
+        except Exception as e:
+            st.error(f"Failed to save edited transcript: {e}")
+
+    st.write("You can select and copy the text above as needed.")

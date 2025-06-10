@@ -10,3 +10,4 @@ aws-requests-auth
 python-multipart
 websockets==10.4
 amazon-transcribe
+python-dotenv
