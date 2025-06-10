@@ -42,11 +42,11 @@ components.html(r"""
     <button id="stop" disabled>Stop Recording</button>
     <button id="pause" style="display: none;">Pause</button>
     <button id="clear">Clear Transcript</button>
-		<button id="copy">Copy</button>
+	<button id="copy">Copy</button>
     <span id="copy-notification" style="color: green; font-weight: bold; display: none; margin-left: 10px;">Copied!</span>
-		<button id="save" style="display: none;">Save to Bucket</button>
-		<span id="save-notification" style="color: green; font-weight: bold; display: none; margin-left: 10px;">Saved!</span>
-		<p id="status" class="idle">Status: Idle</p>
+	<button id="save" style="display: none;">Save</button>
+	<span id="save-notification" style="color: green; font-weight: bold; display: none; margin-left: 10px;">Saved!</span>
+	<p id="status" class="idle">Status: Idle</p>
     <textarea id="transcript" 
       style="
         width: 100%;
