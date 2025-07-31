@@ -10,7 +10,7 @@ ws_endpoint = os.getenv("WS_STREAM_ENDPOINT")
 
 st.set_page_config(page_title="Live Medical Transcription", layout="wide")
 st.title("📝 Live Medical Transcription via Mic (AWS Transcribe Medical)")
-# st.write("→ connecting to:", ws_endpoint, api_base)
+st.write("→ connecting to:", ws_endpoint, api_base)
 
 st.markdown("""
 Use the button below to start recording your voice. Your audio will be streamed to AWS Transcribe Medical in real time.
